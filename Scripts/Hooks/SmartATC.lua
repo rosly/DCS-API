@@ -12,6 +12,7 @@ local http = {
     },
     server = nil, -- Active LuaSocket server instance
     functions = {}, -- Route handlers keyed as "<METHOD> <path>"
+    clients = {}, -- Active connected clients being incrementally read
     bridge = { -- Mission bridge helpers to invoke ATC mission-side dispatch
         call_mission = nil,
     },
@@ -130,47 +131,83 @@ function http.route_request(method, url_path, headers, body)
 end
 
 function http.poll_http()
-    local client = http.server:accept()
-    if not client then
-        return
-    end
-
-    client:settimeout(0)
-
-    local line = client:receive("*l")
-    if not line then
-        client:close()
-        return
-    end
-
-    local method, url_path = http.parse_request_line(line)
-    if not method then
-        http.send_json(client, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
-        client:close()
-        return
-    end
-
-    local headers = {}
     while true do
-        local hline = client:receive("*l")
-        if not hline or hline == "" then
+        local client = http.server:accept()
+        if not client then
             break
         end
-        local k, v = hline:match("^([^:]+):%s*(.*)$")
-        if k then
-            headers[string.lower(k)] = v
+
+        client:settimeout(0)
+        table.insert(http.clients, { socket = client, buffer = "" })
+    end
+
+    local to_close = {}
+
+    for idx, state in ipairs(http.clients) do
+        local client = state.socket
+        local chunk, err, partial = client:receive("*a")
+
+        if chunk and #chunk > 0 then
+            state.buffer = state.buffer .. chunk
+        elseif partial and #partial > 0 then
+            state.buffer = state.buffer .. partial
+        end
+
+        if err == "closed" then
+            table.insert(to_close, idx)
+        end
+
+        local headers_end = state.buffer:find("\r\n\r\n", 1, true)
+        if headers_end then
+            local raw_head = state.buffer:sub(1, headers_end - 1)
+            local remaining = state.buffer:sub(headers_end + 4)
+
+            local lines = {}
+            for line in string.gmatch(raw_head, "([^\r\n]+)") do
+                table.insert(lines, line)
+            end
+
+            local request_line = table.remove(lines, 1)
+            local method, url_path = http.parse_request_line(request_line or "")
+
+            if not method then
+                http.send_json(client, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
+                table.insert(to_close, idx)
+            else
+                local headers = {}
+                for _, hline in ipairs(lines) do
+                    local k, v = hline:match("^([^:]+):%s*(.*)$")
+                    if k then
+                        headers[string.lower(k)] = v
+                    end
+                end
+
+                local cl = tonumber(headers["content-length"] or "0", 10) or 0
+                if #remaining >= cl then
+                    local body = ""
+                    if cl > 0 then
+                        body = remaining:sub(1, cl)
+                    end
+
+                    local status, response_body = http.route_request(method, url_path, headers, body)
+                    http.send_json(client, status, response_body)
+                    table.insert(to_close, idx)
+                else
+                    -- Not enough body data yet; keep waiting and restore buffer
+                    state.buffer = raw_head .. "\r\n\r\n" .. remaining
+                end
+            end
         end
     end
 
-    local body = ""
-    local cl = tonumber(headers["content-length"] or "0", 10)
-    if cl and cl > 0 then
-        body = client:receive(cl) or ""
+    -- Close processed or disconnected clients (reverse order to keep indices stable)
+    for i = #to_close, 1, -1 do
+        local idx = to_close[i]
+        local state = table.remove(http.clients, idx)
+        if state and state.socket then
+            state.socket:close()
+        end
     end
-
-    local status, response_body = http.route_request(method, url_path, headers, body)
-    http.send_json(client, status, response_body)
-    client:close()
 end
 
 function http.init_http_server()
