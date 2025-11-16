@@ -12,6 +12,7 @@ local http = {
     },
     server = nil, -- Active LuaSocket server instance
     functions = {}, -- Route handlers keyed as "<METHOD> <path>"
+    clients = {}, -- Active connected clients being incrementally read
     bridge = { -- Mission bridge helpers to invoke ATC mission-side dispatch
         call_mission = nil,
     },
@@ -130,47 +131,85 @@ function http.route_request(method, url_path, headers, body)
 end
 
 function http.poll_http()
-    local client = http.server:accept()
-    if not client then
-        return
-    end
-
-    client:settimeout(0)
-
-    local line = client:receive("*l")
-    if not line then
-        client:close()
-        return
-    end
-
-    local method, url_path = http.parse_request_line(line)
-    if not method then
-        http.send_json(client, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
-        client:close()
-        return
-    end
-
-    local headers = {}
     while true do
-        local hline = client:receive("*l")
-        if not hline or hline == "" then
+        local client_socket = http.server:accept()
+        if not client_socket then
             break
         end
-        local k, v = hline:match("^([^:]+):%s*(.*)$")
-        if k then
-            headers[string.lower(k)] = v
+
+        client_socket:settimeout(0)
+        table.insert(http.clients, { socket = client_socket, buffer = "", closing = false })
+    end
+
+    for idx, client in ipairs(http.clients) do
+        local client_socket = client.socket
+        local chunk, err, partial = client_socket:receive("*a")
+
+        if chunk and #chunk > 0 then
+            client.buffer = client.buffer .. chunk
+        elseif partial and #partial > 0 then
+            client.buffer = client.buffer .. partial
+        end
+
+        if err == "closed" then
+            client.closing = true
+        end
+
+        local headers_end = client.buffer:find("\r\n\r\n", 1, true)
+        if headers_end then
+            local raw_head = client.buffer:sub(1, headers_end - 1)
+            local remaining = client.buffer:sub(headers_end + 4)
+
+            local lines = {}
+            for line in string.gmatch(raw_head, "([^\r\n]+)") do
+                table.insert(lines, line)
+            end
+
+            local request_line = table.remove(lines, 1)
+            local method, url_path = http.parse_request_line(request_line or "")
+
+            if not method then
+                http.send_json(client_socket, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
+                client.closing = true
+            else
+                local headers = {}
+                for _, hline in ipairs(lines) do
+                    local k, v = hline:match("^([^:]+):%s*(.*)$")
+                    if k then
+                        headers[string.lower(k)] = v
+                    end
+                end
+
+                local cl_header = headers["content-length"]
+                local cl = cl_header and tonumber(cl_header, 10)
+
+                if cl and #remaining >= cl then
+                    local body = cl > 0 and remaining:sub(1, cl) or ""
+                    local status, response_body = http.route_request(method, url_path, headers, body)
+                    http.send_json(client_socket, status, response_body)
+                    client.closing = true
+                elseif not cl then
+                    local status, response_body = http.route_request(method, url_path, headers, remaining)
+                    http.send_json(client_socket, status, response_body)
+                    client.closing = true
+                else
+                    -- Not enough body data yet; keep waiting and restore buffer
+                    client.buffer = raw_head .. "\r\n\r\n" .. remaining
+                end
+            end
         end
     end
 
-    local body = ""
-    local cl = tonumber(headers["content-length"] or "0", 10)
-    if cl and cl > 0 then
-        body = client:receive(cl) or ""
+    -- Close processed or disconnected clients (reverse order to keep indices stable)
+    for i = #http.clients, 1, -1 do
+        local client = http.clients[i]
+        if client.closing then
+            table.remove(http.clients, i)
+            if client.socket then
+                client.socket:close()
+            end
+        end
     end
-
-    local status, response_body = http.route_request(method, url_path, headers, body)
-    http.send_json(client, status, response_body)
-    client:close()
 end
 
 function http.init_http_server()
