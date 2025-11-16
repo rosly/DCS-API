@@ -142,6 +142,13 @@ function http.poll_http()
     end
 
     local to_close = {}
+    local function queue_close(index)
+        local client_state = http.clients[index]
+        if client_state and not client_state._close_requested then
+            client_state._close_requested = true
+            to_close[#to_close + 1] = index
+        end
+    end
 
     for idx, state in ipairs(http.clients) do
         local client = state.socket
@@ -154,7 +161,7 @@ function http.poll_http()
         end
 
         if err == "closed" then
-            table.insert(to_close, idx)
+            queue_close(idx)
         end
 
         local headers_end = state.buffer:find("\r\n\r\n", 1, true)
@@ -172,7 +179,7 @@ function http.poll_http()
 
             if not method then
                 http.send_json(client, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
-                table.insert(to_close, idx)
+                queue_close(idx)
             else
                 local headers = {}
                 for _, hline in ipairs(lines) do
@@ -182,16 +189,18 @@ function http.poll_http()
                     end
                 end
 
-                local cl = tonumber(headers["content-length"] or "0", 10) or 0
-                if #remaining >= cl then
-                    local body = ""
-                    if cl > 0 then
-                        body = remaining:sub(1, cl)
-                    end
+                local cl_header = headers["content-length"]
+                local cl = cl_header and tonumber(cl_header, 10)
 
+                if cl and #remaining >= cl then
+                    local body = cl > 0 and remaining:sub(1, cl) or ""
                     local status, response_body = http.route_request(method, url_path, headers, body)
                     http.send_json(client, status, response_body)
-                    table.insert(to_close, idx)
+                    queue_close(idx)
+                elseif not cl then
+                    local status, response_body = http.route_request(method, url_path, headers, remaining)
+                    http.send_json(client, status, response_body)
+                    queue_close(idx)
                 else
                     -- Not enough body data yet; keep waiting and restore buffer
                     state.buffer = raw_head .. "\r\n\r\n" .. remaining
