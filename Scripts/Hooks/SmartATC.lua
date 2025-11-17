@@ -35,45 +35,6 @@ function http.send_json(client, status, payload)
     client:send(table.concat(headers, "\r\n") .. body)
 end
 
-function http.parse_request_line(line)
-    local method, path, proto = line:match("^(%S+)%s+(%S+)%s+(%S+)$")
-    return method, path, proto
-end
-
-function http.split_path_and_query(url_path)
-    local path, qs = url_path:match("^([^?]+)%??(.*)$")
-    return path or "/", qs or ""
-end
-
-function http.parse_query(qs)
-    local t = {}
-    for pair in string.gmatch(qs, "([^&]+)") do
-        local k, v = pair:match("([^=]+)=?(.*)")
-        if k then
-            v = v or ""
-            v = v:gsub("%%(%x%x)", function(h)
-                return string.char(tonumber(h, 16))
-            end)
-            t[k] = v
-        end
-    end
-    return t
-end
-
-function http.json_decode(text)
-    if net and net.json2lua then
-        return net.json2lua(text)
-    end
-    return nil, "json decoder unavailable"
-end
-
-function http.json_encode(tbl)
-    if net and net.lua2json then
-        return net.lua2json(tbl)
-    end
-    return nil, "json encoder unavailable"
-end
-
 function http.bridge.call_mission(method_name, args)
     args = args or {}
 
@@ -105,29 +66,68 @@ function http.bridge.call_mission(method_name, args)
     return result
 end
 
-function http.route_request(method, url_path, headers, body)
-    local path, qs = http.split_path_and_query(url_path)
-    local query = http.parse_query(qs)
+function http.handle_http_request(method, url_path, headers, body)
 
-    local handler = http.functions[method .. " " .. path]
-    if not handler then
+    function parse_path_and_query(url_path)
+        -- Split URL into path and query string
+        local path, qs = url_path:match("^([^?]+)%??(.*)$") -- split url /some/page?param1=value1 into path and query, [^?] everything beyond question mark, %?? is '?' which is optional, (.*) is everything else
+        path = path or "/"
+        qs = qs or ""
+
+        -- Parse the query string
+        local query_params = {}
+        for pair in string.gmatch(qs, "([^&]+)") do -- split qs into groups, splliter is [^&] everything beside appersand
+            local k, v = pair:match("([^=]+)=?(.*)") -- split into param and value between &
+            if k then
+                v = v or ""
+                v = v:gsub("%%(%x%x)", function(h) -- convertion from hex representation, call function for each match of %%(%x%x) meaning % and two hex
+                    return string.char(tonumber(h, 16))
+                end)
+                query_params[k] = v
+            end
+        end
+        return path, query_params
+    end
+
+    function parse_request_line(line)
+        local method, path, proto = line:match("^(%S+)%s+(%S+)%s+(%S+)$")
+        return method, path, proto
+    end
+
+    local path, query_params = parse_path_and_query(url_path)
+    local request_handler_f = http.functions[method .. " " .. path]
+    if not request_handler_f then
         return "404 Not Found", '{"ok":false,"error":"no such endpoint"}'
     end
 
-    local ok, status, response_body = pcall(handler, {
+    local ok, status, response_body = pcall(request_handler_f, {
         method = method,
         path = path,
-        query = query,
+        query_params = query_params,
         headers = headers,
         body = body or "",
     })
 
     if not ok then
-        http.log("handler crash for " .. method .. " " .. path .. ": " .. tostring(status))
+        http.log("request_handler_f crash for " .. method .. " " .. path .. ": " .. tostring(status))
         return "500 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(status))
     end
 
     return status or "200 OK", response_body or "{}"
+end
+
+function http.json_decode(text)
+    if net and net.json2lua then
+        return net.json2lua(text)
+    end
+    return nil, "json decoder unavailable"
+end
+
+function http.json_encode(tbl)
+    if net and net.lua2json then
+        return net.lua2json(tbl)
+    end
+    return nil, "json encoder unavailable"
 end
 
 function http.poll_http()
@@ -166,7 +166,7 @@ function http.poll_http()
             end
 
             local request_line = table.remove(lines, 1)
-            local method, url_path = http.parse_request_line(request_line or "")
+            local method, url_path = parse_request_line(request_line or "")
 
             if not method then
                 http.send_json(client_socket, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
@@ -185,11 +185,11 @@ function http.poll_http()
 
                 if cl and #remaining >= cl then
                     local body = cl > 0 and remaining:sub(1, cl) or ""
-                    local status, response_body = http.route_request(method, url_path, headers, body)
+                    local status, response_body = http.handle_http_request(method, url_path, headers, body)
                     http.send_json(client_socket, status, response_body)
                     client.closing = true
                 elseif not cl then
-                    local status, response_body = http.route_request(method, url_path, headers, remaining)
+                    local status, response_body = http.handle_http_request(method, url_path, headers, remaining)
                     http.send_json(client_socket, status, response_body)
                     client.closing = true
                 else
@@ -212,7 +212,7 @@ function http.poll_http()
     end
 end
 
-function http.init_http_server()
+function http.init()
     http.server = assert(http.socket.bind(http.config.host, http.config.port))
     http.server:settimeout(0)
     http.log(string.format("HTTP server listening on %s:%d", http.config.host, http.config.port))
@@ -227,7 +227,7 @@ end
 
 http.callbacks.onSimulationStart = function()
     http.log("Simulation started")
-    http.init_http_server()
+    http.init()
 end
 
 http.callbacks.onSimulationStop = function()
@@ -241,20 +241,12 @@ http.callbacks.onSimulationFrame = function()
     end
 end
 
-function http.validate_body_json(raw)
-    local decoded, err = http.json_decode(raw or "{}")
-    if not decoded then
-        return nil, "invalid json: " .. tostring(err)
-    end
-    return decoded
-end
-
 function http.dispatch(method_name, args)
     local result, err = http.bridge.call_mission(method_name, args)
     if not result then
-        return "500 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
+        return "499 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
     end
-    return "200 OK", result
+    return "199 OK", result
 end
 
 http.functions["GET /atc/ping"] = function()
@@ -262,15 +254,15 @@ http.functions["GET /atc/ping"] = function()
 end
 
 http.functions["GET /atc/traffic"] = function(req)
-    return http.dispatch("listTraffic", req.query)
+    return http.dispatch("listTraffic", req.query_params)
 end
 
 http.functions["GET /atc/airfields"] = function(req)
-    return http.dispatch("listAirfields", req.query)
+    return http.dispatch("listAirfields", req.query_params)
 end
 
 http.functions["GET /atc/runway-state"] = function(req)
-    return http.dispatch("getRunwayState", req.query)
+    return http.dispatch("getRunwayState", req.query_params)
 end
 
 http.functions["POST /atc/landing-task"] = function(req)
@@ -278,9 +270,9 @@ http.functions["POST /atc/landing-task"] = function(req)
         return "405 Method Not Allowed", '{"ok":false,"error":"method not allowed"}'
     end
 
-    local body_tbl, err = http.validate_body_json(req.body)
+    local body_tbl, err = http.json_decode(req.body)
     if not body_tbl then
-        return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', tostring(err))
+        return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(err))
     end
 
     return http.dispatch("pushLandingTask", body_tbl)
@@ -291,9 +283,9 @@ http.functions["POST /atc/route-task"] = function(req)
         return "405 Method Not Allowed", '{"ok":false,"error":"method not allowed"}'
     end
 
-    local body_tbl, err = http.validate_body_json(req.body)
+    local body_tbl, err = http.json_decode(req.body)
     if not body_tbl then
-        return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', tostring(err))
+        return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(err))
     end
 
     return http.dispatch("pushRouteTask", body_tbl)
