@@ -11,18 +11,41 @@ local http = {
         port = 5011,
     },
     server = nil, -- Active LuaSocket server instance
-    functions = {}, -- Route handlers keyed as "<METHOD> <path>"
-    clients = {}, -- Active connected clients being incrementally read
-    bridge = { -- Mission bridge helpers to invoke ATC mission-side dispatch
-        call_mission = nil,
+    http_mission_handlers = { -- Route handlers keyed by method, then path
+        GET = {
+            ["/atc/traffic"] = "listTraffic",
+            ["/atc/airfields"] = "listAirfields",
+            ["/atc/runway-state"] = "getRunwayState",
+        },
+        POST = {
+            ["/atc/landing-task"] = "pushLandingTask",
+            ["/atc/route-task"] = "pushRouteTask",
+        },
+        PUT = {}, -- Not used yet
+        DELETE = {}, -- Not used yet
     },
+    clients = {}, -- Active connected clients being incrementally read
 }
 
 function http.log(msg)
     env.info("[SmartATC] " .. msg)
 end
 
-function http.send_json(client, status, payload)
+function http.json_decode(text)
+    if net and net.json2lua then
+        return net.json2lua(text)
+    end
+    return nil, "json decoder unavailable"
+end
+
+function http.json_encode(tbl)
+    if net and net.lua2json then
+        return net.lua2json(tbl)
+    end
+    return nil, "json encoder unavailable"
+end
+
+function http.send_response(client, status, payload)
     local body = payload or "{}"
     local headers = {
         "HTTP/1.1 " .. status,
@@ -35,13 +58,7 @@ function http.send_json(client, status, payload)
     client:send(table.concat(headers, "\r\n") .. body)
 end
 
-function http.bridge.call_mission(method_name, args)
-    args = args or {}
-
-    local encoded_args, err = http.json_encode(args)
-    if not encoded_args then
-        return nil, "failed to encode args: " .. tostring(err)
-    end
+function http.call_mission(method_name, args)
 
     local mission_code = string.format([==[
         return a_do_script([=[
@@ -54,7 +71,7 @@ function http.bridge.call_mission(method_name, args)
             end
             return result
         ]=])
-    ]==], method_name, encoded_args)
+    ]==], method_name, args or "{}") -- args are expected to be a JSON encoded string
 
     local ok, result, err_msg = net.dostring_in("mission", mission_code)
 
@@ -89,48 +106,46 @@ function http.handle_http_request(method, url_path, headers, body)
         return path, query_params
     end
 
+    local path, query_params = parse_path_and_query(url_path)
+    local http_handlers = http.http_mission_handlers[method]
+    if not http_handlers then
+        return "405 Method Not Allowed", '{"ok":false,"error":"method not allowed"}'
+    end
+
+    local mission_api_handler = http_handlers[path]
+    if not mission_api_handler then
+        return "404 Not Found", '{"ok":false,"error":"no such endpoint"}'
+    end
+
+    if method == "GET" then
+        local encoded_args, json_err = http.json_encode(query_params)
+        if not encoded_args then
+            http.log("json_encode failed for " .. mission_api_handler .. ": " .. tostring(json_err))
+            return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode arguments: %s"}', tostring(json_err))
+        end
+    else
+        local req_body = body or ""
+        local body_tbl, json_err = http.json_decode(req_body)
+        if not body_tbl then
+            return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(json_err))
+        end
+        encoded_args = req_body
+    end
+
+    local result, err = http.call_mission(mission_api_handler, encoded_args)
+    if not result then
+        return "499 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
+    end
+    return "200 OK", result
+end
+
+function http.poll_http()
+
     function parse_request_line(line)
         local method, path, proto = line:match("^(%S+)%s+(%S+)%s+(%S+)$")
         return method, path, proto
     end
 
-    local path, query_params = parse_path_and_query(url_path)
-    local request_handler_f = http.functions[method .. " " .. path]
-    if not request_handler_f then
-        return "404 Not Found", '{"ok":false,"error":"no such endpoint"}'
-    end
-
-    local ok, status, response_body = pcall(request_handler_f, {
-        method = method,
-        path = path,
-        query_params = query_params,
-        headers = headers,
-        body = body or "",
-    })
-
-    if not ok then
-        http.log("request_handler_f crash for " .. method .. " " .. path .. ": " .. tostring(status))
-        return "500 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(status))
-    end
-
-    return status or "200 OK", response_body or "{}"
-end
-
-function http.json_decode(text)
-    if net and net.json2lua then
-        return net.json2lua(text)
-    end
-    return nil, "json decoder unavailable"
-end
-
-function http.json_encode(tbl)
-    if net and net.lua2json then
-        return net.lua2json(tbl)
-    end
-    return nil, "json encoder unavailable"
-end
-
-function http.poll_http()
     while true do
         local client_socket = http.server:accept()
         if not client_socket then
@@ -169,7 +184,7 @@ function http.poll_http()
             local method, url_path = parse_request_line(request_line or "")
 
             if not method then
-                http.send_json(client_socket, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
+                http.send_response(client_socket, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
                 client.closing = true
             else
                 local headers = {}
@@ -186,11 +201,11 @@ function http.poll_http()
                 if cl and #remaining >= cl then
                     local body = cl > 0 and remaining:sub(1, cl) or ""
                     local status, response_body = http.handle_http_request(method, url_path, headers, body)
-                    http.send_json(client_socket, status, response_body)
+                    http.send_response(client_socket, status, response_body)
                     client.closing = true
                 elseif not cl then
                     local status, response_body = http.handle_http_request(method, url_path, headers, remaining)
-                    http.send_json(client_socket, status, response_body)
+                    http.send_response(client_socket, status, response_body)
                     client.closing = true
                 else
                     -- Not enough body data yet; keep waiting and restore buffer
@@ -239,56 +254,6 @@ http.callbacks.onSimulationFrame = function()
     if http.server then
         http.poll_http()
     end
-end
-
-function http.dispatch(method_name, args)
-    local result, err = http.bridge.call_mission(method_name, args)
-    if not result then
-        return "499 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
-    end
-    return "199 OK", result
-end
-
-http.functions["GET /atc/ping"] = function()
-    return "200 OK", '{"ok":true}'
-end
-
-http.functions["GET /atc/traffic"] = function(req)
-    return http.dispatch("listTraffic", req.query_params)
-end
-
-http.functions["GET /atc/airfields"] = function(req)
-    return http.dispatch("listAirfields", req.query_params)
-end
-
-http.functions["GET /atc/runway-state"] = function(req)
-    return http.dispatch("getRunwayState", req.query_params)
-end
-
-http.functions["POST /atc/landing-task"] = function(req)
-    if req.method ~= "POST" then
-        return "405 Method Not Allowed", '{"ok":false,"error":"method not allowed"}'
-    end
-
-    local body_tbl, err = http.json_decode(req.body)
-    if not body_tbl then
-        return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(err))
-    end
-
-    return http.dispatch("pushLandingTask", body_tbl)
-end
-
-http.functions["POST /atc/route-task"] = function(req)
-    if req.method ~= "POST" then
-        return "405 Method Not Allowed", '{"ok":false,"error":"method not allowed"}'
-    end
-
-    local body_tbl, err = http.json_decode(req.body)
-    if not body_tbl then
-        return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(err))
-    end
-
-    return http.dispatch("pushRouteTask", body_tbl)
 end
 
 Sim.setUserCallbacks(http.callbacks)
