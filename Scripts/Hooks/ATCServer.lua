@@ -14,12 +14,12 @@ local http = {
     http_mission_handlers = { -- Route handlers keyed by method, then path
         GET = {
             ["/atc/traffic"] = "listTraffic",
-            ["/atc/airfields"] = "listAirfields",
-            ["/atc/runway-state"] = "getRunwayState",
+--            ["/atc/airfields"] = "listAirfields",
+--            ["/atc/runway-state"] = "getRunwayState",
         },
         POST = {
-            ["/atc/landing-task"] = "pushLandingTask",
-            ["/atc/route-task"] = "pushRouteTask",
+--            ["/atc/landing-task"] = "pushLandingTask",
+--            ["/atc/route-task"] = "pushRouteTask",
         },
         PUT = {}, -- Not used yet
         DELETE = {}, -- Not used yet
