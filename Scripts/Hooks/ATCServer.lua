@@ -1,11 +1,7 @@
 -- SmartATC HTTP server state and configuration
 local http = {
     socket = require("socket"), -- LuaSocket dependency used for the TCP listener
-    callbacks = { -- DCS simulation callbacks registered via Sim.setUserCallbacks
-        onSimulationStart = nil,
-        onSimulationStop = nil,
-        onSimulationFrame = nil,
-    },
+    callbacks = {}
     config = { -- Listener binding details
         host = "127.0.0.1",
         port = 5011,
@@ -228,9 +224,16 @@ function http.poll_http()
 end
 
 function http.init()
-    http.server = assert(http.socket.bind(http.config.host, http.config.port))
+    local server, err = http.socket.bind(http.config.host, http.config.port)
+    if not server then
+        http.log(string.format("Error initializing HTTP server on %s:%d: %s", http.config.host, http.config.port, tostring(err)))
+        return false, err
+    end
+
+    http.server = server
     http.server:settimeout(0)
     http.log(string.format("HTTP server listening on %s:%d", http.config.host, http.config.port))
+    return true
 end
 
 function http.stop()
@@ -240,9 +243,36 @@ function http.stop()
     end
 end
 
+--- Injects the ATC_API.lua script into the mission scripting environment.
+-- This is called from the onSimulationStart hook to make the API available
+-- to the mission without requiring manual setup by the mission author.
+function http.injectApiIntoMission()
+    -- lfs is available in the server hook environment
+    local lfs = require("lfs")
+    local path = lfs.writedir() .. [[Scripts\ATC_API.lua]]
+    -- The code to be executed in the 'mission' state. It calls a_do_file,
+    -- which in turn loads the script into the Mission Scripting Environment (MSE).
+    local code = string.format([[a_do_file([[%s]])]], path)
+
+    local ok, err = net.dostring_in('mission', code)
+    if not ok then
+        http.log("Error injecting ATC_API into mission: " .. tostring(err))
+        return false
+    end
+
+    return true
+end
+
 http.callbacks.onSimulationStart = function()
     http.log("Simulation started")
-    http.init()
+    if not http.injectApiIntoMission() then
+         http.log("ATC_API.lua injection failed")
+         return
+    end
+    local ok, err = http.init()
+    if not ok then
+        http.log("HTTP server failed to start: " .. tostring(err))
+    end
 end
 
 http.callbacks.onSimulationStop = function()
