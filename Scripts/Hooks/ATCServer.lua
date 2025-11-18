@@ -1,13 +1,14 @@
 -- SmartATC HTTP server state and configuration
 local http = {
-    socket = require("socket"), -- LuaSocket dependency used for the TCP listener
-    callbacks = {}
-    config = { -- Listener binding details
+    socket = require("socket"),
+    callbacks = {},
+    config = {
         host = "127.0.0.1",
         port = 5011,
     },
-    server = nil, -- Active LuaSocket server instance
-    http_mission_handlers = { -- Route handlers keyed by method, then path
+    server = nil,
+-- Route handlers keyed by method, then path
+    http_mission_handlers = {
         GET = {
             ["/atc/traffic"] = "listTraffic",
 --            ["/atc/airfields"] = "listAirfields",
@@ -24,7 +25,13 @@ local http = {
 }
 
 function http.log(msg)
-    env.info("[SmartATC] " .. msg)
+    if net and net.log then
+        net.log("[SmartATC] " .. msg)
+    elseif env and env.info then
+        env.info("[SmartATC] " .. msg)
+    else
+        print("[SmartATC] " .. msg)
+    end
 end
 
 function http.json_decode(text)
@@ -249,12 +256,12 @@ end
 function http.injectApiIntoMission()
     -- lfs is available in the server hook environment
     local lfs = require("lfs")
-    local path = lfs.writedir() .. [[Scripts\ATC_API.lua]]
+    local path = lfs.writedir() .. 'Scripts\\ATC_API.lua'
     -- The code to be executed in the 'mission' state. It calls a_do_file,
     -- which in turn loads the script into the Mission Scripting Environment (MSE).
-    local code = string.format([[a_do_file([[%s]])]], path)
+    local code = "a_do_file([[" .. path .. "]])"
 
-    local ok, err = net.dostring_in('mission', code)
+    local ok, err = net.dostring_in("mission", code)
     if not ok then
         http.log("Error injecting ATC_API into mission: " .. tostring(err))
         return false
