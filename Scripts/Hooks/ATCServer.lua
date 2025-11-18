@@ -63,6 +63,7 @@ end
 
 function http.call_mission(method_name, args)
 
+    -- args are expected to be a JSON encoded string
     local mission_code = string.format([==[
         return a_do_script([=[
             if not ATC_API or not ATC_API.dispatch then
@@ -70,11 +71,11 @@ function http.call_mission(method_name, args)
             end
             local status, result = pcall(ATC_API.dispatch, %q, %q)
             if not status then
-                return string.format([[{"error":"%s"}]], tostring(result))
-            end
+                return string.format([[{"error":"%%s"}]], tostring(result))
+            end 
             return result
         ]=])
-    ]==], method_name, args or "{}") -- args are expected to be a JSON encoded string
+    ]==], method_name, args or "{}")
 
     local ok, result, err_msg = net.dostring_in("mission", mission_code)
 
@@ -139,6 +140,15 @@ function http.handle_http_request(method, url_path, headers, body)
     if not result then
         return "499 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
     end
+    -- result should be JSON string, if it is not try use fallback
+    if type(result) ~= "string" then
+        local encoded_result, json_err = http.json_encode(result)
+        if not encoded_result then
+            return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode result: %s"}', tostring(json_err))
+        end
+        result = encoded_result
+    end
+
     return "200 OK", result
 end
 
