@@ -1,5 +1,5 @@
 -- SmartATC HTTP server state and configuration
-local http = {
+http = {
     socket = require("socket"),
     callbacks = {},
     config = {
@@ -66,7 +66,7 @@ function http.call_mission(method_name, args)
     -- args are expected to be a JSON encoded string
     local mission_code = string.format([==[
         return a_do_script([=[
-            if not ATC_API or not ATC_API.dispatch then
+            if (not ATC_API) or (not ATC_API.dispatch) then
                 return [[{"error":"ATC_API not loaded"}]]
             end
             local status, result = pcall(ATC_API.dispatch, %q, %q)
@@ -79,7 +79,7 @@ function http.call_mission(method_name, args)
 
     local ok, result, err_msg = net.dostring_in("mission", mission_code)
 
-    if not ok then
+    if (not ok) then
         http.log(string.format("mission dispatch failed for %s: %s", method_name, tostring(err_msg or result)))
         return nil, tostring(err_msg or result or "unknown error")
     end
@@ -112,38 +112,38 @@ function http.handle_http_request(method, url_path, headers, body)
 
     local path, query_params = parse_path_and_query(url_path)
     local http_handlers = http.http_mission_handlers[method]
-    if not http_handlers then
+    if (not http_handlers) then
         return "405 Method Not Allowed", '{"ok":false,"error":"method not allowed"}'
     end
 
     local mission_api_handler = http_handlers[path]
-    if not mission_api_handler then
+    if (not mission_api_handler) then
         return "404 Not Found", '{"ok":false,"error":"no such endpoint"}'
     end
 
     if method == "GET" then
         local encoded_args, json_err = http.json_encode(query_params)
-        if not encoded_args then
+        if (not encoded_args) then
             http.log("json_encode failed for " .. mission_api_handler .. ": " .. tostring(json_err))
             return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode arguments: %s"}', tostring(json_err))
         end
     else
         local req_body = body or ""
         local body_tbl, json_err = http.json_decode(req_body)
-        if not body_tbl then
+        if (not body_tbl) then
             return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(json_err))
         end
         encoded_args = req_body
     end
 
     local result, err = http.call_mission(mission_api_handler, encoded_args)
-    if not result then
+    if (not result) then
         return "499 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
     end
     -- result should be JSON string, if it is not try use fallback
     if type(result) ~= "string" then
         local encoded_result, json_err = http.json_encode(result)
-        if not encoded_result then
+        if (not encoded_result) then
             return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode result: %s"}', tostring(json_err))
         end
         result = encoded_result
@@ -161,7 +161,7 @@ function http.poll_http()
 
     while true do
         local client_socket = http.server:accept()
-        if not client_socket then
+        if (not client_socket) then
             break
         end
 
@@ -196,7 +196,7 @@ function http.poll_http()
             local request_line = table.remove(lines, 1)
             local method, url_path = parse_request_line(request_line or "")
 
-            if not method then
+            if (not method) then
                 http.send_response(client_socket, "400 Bad Request", '{"ok":false,"error":"bad request line"}')
                 client.closing = true
             else
@@ -216,7 +216,7 @@ function http.poll_http()
                     local status, response_body = http.handle_http_request(method, url_path, headers, body)
                     http.send_response(client_socket, status, response_body)
                     client.closing = true
-                elseif not cl then
+                elseif (not cl) then
                     local status, response_body = http.handle_http_request(method, url_path, headers, remaining)
                     http.send_response(client_socket, status, response_body)
                     client.closing = true
@@ -242,7 +242,7 @@ end
 
 function http.init()
     local server, err = http.socket.bind(http.config.host, http.config.port)
-    if not server then
+    if (not server) then
         http.log(string.format("Error initializing HTTP server on %s:%d: %s", http.config.host, http.config.port, tostring(err)))
         return false, err
     end
@@ -267,12 +267,19 @@ function http.injectApiIntoMission()
     -- lfs is available in the server hook environment
     local lfs = require("lfs")
     local path = lfs.writedir() .. 'Scripts\\ATC_API.lua'
+
+    -- Check if the file exists before trying to inject it.
+    if not (lfs.attributes(path, "mode") == "file") then
+        http.log("ATC_API.lua script not found at path: " .. path)
+        return false
+    end
+
     -- The code to be executed in the 'mission' state. It calls a_do_file,
     -- which in turn loads the script into the Mission Scripting Environment (MSE).
     local code = "a_do_file([[" .. path .. "]])"
 
     local ok, err = net.dostring_in("mission", code)
-    if not ok then
+    if (not ok) then
         http.log("Error injecting ATC_API into mission: " .. tostring(err))
         return false
     end
@@ -282,12 +289,12 @@ end
 
 http.callbacks.onSimulationStart = function()
     http.log("Simulation started")
-    if not http.injectApiIntoMission() then
+    if (not http.injectApiIntoMission()) then
          http.log("ATC_API.lua injection failed")
          return
     end
     local ok, err = http.init()
-    if not ok then
+    if (not ok) then
         http.log("HTTP server failed to start: " .. tostring(err))
     end
 end

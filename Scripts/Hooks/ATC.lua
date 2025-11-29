@@ -82,7 +82,7 @@ end
 -- @param filter string|nil: One of `"ALL"`, `"FRIENDLY"`, `"HOSTILE"`, `"NEUTRAL"`, or nil.
 -- @return boolean: `true` when the contact should be kept.
 local function _coalitionFilterPasses(atcCoalition, unitCoalition, filter)
-    if not filter or filter == "ALL" then
+    if (not filter) or filter == "ALL" then
         return true
     end
     if filter == "FRIENDLY" then
@@ -99,7 +99,7 @@ end
 -- @param unit Unit|nil: Source unit. Range: any `Unit` or nil.
 -- @return string|nil: Callsign text when accessible.
 local function _getCallsign(unit)
-    if not unit or not unit.getCallsign then
+    if (not unit) or (not unit.getCallsign) then
         return nil
     end
     local ok, value = pcall(unit.getCallsign, unit)
@@ -147,12 +147,7 @@ local function _buildContact(atcUnit, controller, unit)
     local position = unit:getPoint()
     local velocity = unit:getVelocity() or { x = 0, y = 0, z = 0 }
     local horizontalSpeed = math.sqrt((velocity.x or 0) ^ 2 + (velocity.z or 0) ^ 2)
-    local groundSpeedKmh = mist.utils.mpsToKmph(horizontalSpeed)
-    local headingRad = math.atan2(velocity.z or 0, velocity.x or 0)
-    if headingRad < 0 then
-        headingRad = headingRad + (2 * math.pi)
-    end
-    local headingDeg = mist.utils.toDegree(headingRad)
+    local attitude = mist.getAttitude(unit)
     local atcPoint = atcUnit:getPoint()
     local rangeKm = mist.utils.get3DDist(atcPoint, position) / 1000
     local bearingDeg = _bearingDeg(atcPoint, position)
@@ -168,9 +163,9 @@ local function _buildContact(atcUnit, controller, unit)
         typeName = unit:getTypeName(),
         position = position,
         velocity = velocity,
-        groundSpeedKmh = groundSpeedKmh,
+        groundSpeedKmh = mist.utils.mpsToKmph(horizontalSpeed),
         altitudeM = position.y,
-        headingDeg = headingDeg,
+        headingDeg = attitude and mist.utils.toDegree(attitude.Heading) or 0,
         inAir = unit:inAir(),
         rangeKm = rangeKm,
         bearingDeg = bearingDeg,
@@ -186,7 +181,7 @@ end
 function ATC.listAirTraffic(atcUnit, opts)
     opts = opts or {}
     if opts.coalition and type(opts.coalition) == 'string' then
-        opts.coalition = string.upper(opts.coalition)
+        opts.coalition = string.upper(opts.coalition) 
     end
     local _, controller = _assertRadarUnit(atcUnit)
     local detected = controller:getDetectedTargets(
@@ -203,7 +198,7 @@ function ATC.listAirTraffic(atcUnit, opts)
                 local desc = target:getDesc()
                 if desc and (desc.category == Unit.Category.AIRPLANE or desc.category == Unit.Category.HELICOPTER) then
                     if _coalitionFilterPasses(atcCoalition, target:getCoalition(), opts.coalition) then
-                        local contact = _buildContact(atcUnit, controller, target)
+                        local contact = _buildContact(atcUnit, controller, target) 
                         if not opts.maxRangeKm or contact.rangeKm <= opts.maxRangeKm then
                             table.insert(contacts, contact)
                         end
@@ -222,7 +217,7 @@ end
 function ATC.listGroundTraffic(atcUnit, opts)
     opts = opts or {}
     if opts.coalition and type(opts.coalition) == 'string' then
-        opts.coalition = string.upper(opts.coalition)
+        opts.coalition = string.upper(opts.coalition) 
     end
     assert(opts.maxRangeKm and opts.maxRangeKm > 0, "opts.maxRangeKm must be provided for ground traffic")
     local _ = _assertRadarUnit(atcUnit)
@@ -236,7 +231,7 @@ function ATC.listGroundTraffic(atcUnit, opts)
             local desc = unit:getDesc()
             if desc and (desc.category == Unit.Category.AIRPLANE or desc.category == Unit.Category.HELICOPTER) then
                 if not unit:inAir() then
-                    if _coalitionFilterPasses(atcCoalition, unit:getCoalition(), opts.coalition) then
+                    if _coalitionFilterPasses(atcCoalition, unit:getCoalition(), opts.coalition) then 
                         local contact = _buildContact(atcUnit, nil, unit)
                         contact.detection = { radar = false, visual = false, optic = false }
                         table.insert(contacts, contact)
@@ -367,7 +362,7 @@ function ATC.listWaypoints(atcUnit, groupName)
     local route = mist.getGroupRoute(groupName, true)
     if not route then
         return nil
-    end
+    end 
     local waypoints = {}
     for idx, point in ipairs(route) do
         local position = { x = point.point and point.point.x or point.x, y = point.alt, z = point.point and point.point.y or point.y }
