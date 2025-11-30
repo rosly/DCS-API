@@ -33,9 +33,9 @@ ATC_API = {
 }
 
 ATC_API.coalitionSideToName = {
-    [coalition.side.BLUE] = "BLUE",
-    [coalition.side.RED] = "RED",
-    [coalition.side.NEUTRAL] = "NEUTRAL",
+    [2] = "BLUE",     -- coalition.side.BLUE
+    [1] = "RED",      -- coalition.side.RED
+    [0] = "NEUTRAL",  -- coalition.side.NEUTRAL
 }
 
 ATC_API.mist = mist    
@@ -71,59 +71,43 @@ end
 -- @treturn string JSON encoded response body ready for HTTP consumption.
 function ATC_API.dispatch(methodName, argsJson)
 
+    local function json_encode_error(message)
+        return '{"ok":false,"error":"ATC_API.dispatch error: ' .. tostring(message) .. '"}'
+    end
+
     if (not ATC_API.mist) then
-        return ATC_API.encode_response(ATC_API.error_payload("mist.lua is missing or failed to load"))
-    end
-
-    local function error_payload(message)
-        return { ok = false, error = tostring(message or "unknown error") }
-    end
-
-    local function encode_response(payload)
-        local encoded, err = json_encode(payload)
-        if encoded then
-            return encoded
-        end
-        -- As a last resort ensure we do not propagate nil back to the HTTP layer.
-        local fallback = string.format('{"ok":false,"error":"%s","encodeError":"%s"}',
-            tostring(payload and payload.error or "json encode failed"),
-            tostring(err))
-        return fallback
+        return json_encode_error("mist.lua is missing or failed to load")
     end
 
     local args, decode_err = ATC_API.json_decode(argsJson)
     if not args then
-        return ATC_API.encode_response(error_payload("invalid json: " .. tostring(decode_err)))
+        return json_encode_error("invalid json input: " .. tostring(decode_err))
     end
     if args == nil or type(args) ~= "table" then
-        return ATC_API.encode_response(error_payload("invalid json: ATC_API arguments must decode to a table"))
+        return json_encode_error("invalid input: ATC_API arguments must decode to a table")
     end
 
     if (type(methodName) ~= "string") or (methodName == "") then
-        return ATC_API.encode_response(error_payload("method name required"))
+        return json_encode_error("method name required")
     end
     local handler = ATC_API.methods[methodName]
     if (handler == nil) or (type(handler) ~= "function") then
-        return ATC_API.encode_response(error_payload("unknown method: " .. methodName))
+        return json_encode_error("unknown method handler: " .. methodName)
     end
 
     local ok, result = pcall(handler, args)
     if not ok then
-        return ATC_API.encode_response(error_payload(result))
+        return json_encode_error("pcall failed: " .. tostring(result))
+    end
+    if (result == nil) or (type(result) ~= "table") then
+        return json_encode_error("ATC_API methods must return a table")
     end
 
-    if result == nil then
-        result = {}
-    end
-    if type(result) ~= "table" then
-        return ATC_API.encode_response(error_payload("ATC_API methods must return a table"))
-    end
-
-    local encoded, err = ATC_API.json_encode(result)
+    local encoded, encode_err = ATC_API.json_encode(result)
     if encoded then
         return encoded
     end
-    return ATC_API.encode_response(error_payload(err))
+    return json_encode_error("invalid json result encoding output: " .. tostring(encode_err))
 end
 
 --- Compute the bearing in degrees between two 3D points.

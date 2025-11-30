@@ -4,7 +4,7 @@ http = {
     callbacks = {},
     config = {
         host = "127.0.0.1",
-        port = 5011,
+        port = 5014,
     },
     server = nil,
 -- Route handlers keyed by method, then path
@@ -27,8 +27,8 @@ http = {
 function http.log(msg)
     if net and net.log then
         net.log("[SmartATC] " .. msg)
-    elseif env and env.info then
-        env.info("[SmartATC] " .. msg)
+--    elseif env and env.info then
+--        env.info("[SmartATC] " .. msg)
     else
         print("[SmartATC] " .. msg)
     end
@@ -48,6 +48,32 @@ function http.json_encode(tbl)
     return nil, "json encoder unavailable"
 end
 
+-- Helper function to serialize a Lua table into a readable string for logging.
+function http.serialize_table(val, level)
+    level = level or 3 -- Default max depth
+    if type(val) == "string" then
+        return '"' .. val .. '"'
+    end
+    if type(val) == "number" or type(val) == "boolean" then
+        return tostring(val)
+    end
+    if type(val) == "table" then
+        if level <= 0 then
+            return "{...}"
+        end
+        local parts = {}
+        for k, v in pairs(val) do
+            local key_str = '["' .. tostring(k) .. '"]'
+            local val_str = http.serialize_table(v, level - 1)
+            table.insert(parts, string.format("%s=%s", key_str, val_str))
+        end
+        return "{ " .. table.concat(parts, ", ") .. " }"
+    end
+    -- For other types like functions, userdata, etc.
+    return '"' .. tostring(val) .. '"'
+end
+
+
 function http.send_response(client, status, payload)
     local body = payload or "{}"
     local headers = {
@@ -62,8 +88,11 @@ function http.send_response(client, status, payload)
 end
 
 function http.call_mission(method_name, args)
-
     -- args are expected to be a JSON encoded string
+    if type(args) ~= "string" then
+        http.log("Error: args to call_mission must be a string, got " .. type(args))
+        return nil, "Internal error: arguments must be a JSON string."
+    end
     local mission_code = string.format([==[
         return a_do_script([=[
             if (not ATC_API) or (not ATC_API.dispatch) then
@@ -75,14 +104,16 @@ function http.call_mission(method_name, args)
             end 
             return result
         ]=])
-    ]==], method_name, args or "{}")
+    ]==], method_name, args)
 
-    local ok, result, err_msg = net.dostring_in("mission", mission_code)
-
-    if (not ok) then
-        http.log(string.format("mission dispatch failed for %s: %s", method_name, tostring(err_msg or result)))
-        return nil, tostring(err_msg or result or "unknown error")
+    http.log("Calling mission:" .. method_name .. ": " .. args)
+    local result, success = net.dostring_in("mission", mission_code)
+    if (not success) then
+        err_str = string.format("mission dispatch failed for %s: %s, %s", method_name, tostring(result), tostring(success))
+        http.log(err_str)
+        return err_str
     end
+    http.log(string.format("mission dispatch success for %s: %s, %s", method_name, tostring(result), tostring(success)))
 
     return result
 end
@@ -121,24 +152,25 @@ function http.handle_http_request(method, url_path, headers, body)
         return "404 Not Found", '{"ok":false,"error":"no such endpoint"}'
     end
 
+    local encoded_args = ""
     if method == "GET" then
-        http.log(method .. " encoding query_params:" .. tostring(query_params))
-        local encoded_args, json_err = http.json_encode(query_params)
-        if (not encoded_args) then
+        http.log(method .. " encoding query_params: " .. http.serialize_table(query_params, 3) .. " url_path: " .. url_path)
+        local getargs_json, json_err = http.json_encode(query_params)
+        if (not getargs_json) then
             http.log("json_encode failed for " .. mission_api_handler .. ": " .. tostring(json_err))
             return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode arguments: %s"}', tostring(json_err))
         end
+        encoded_args = getargs_json
     else
-        http.log(method .. " encoding req_body:" .. tostring(req_body))
-        local req_body = body or ""
-        local body_tbl, json_err = http.json_decode(req_body)
+        -- verify that body is JSON encoded
+        http.log(method .. " verifing/decoding JSON req_body:" .. tostring(body))
+        local body_tbl, json_err = http.json_decode(body)
         if (not body_tbl) then
             return "400 Bad Request", string.format('{"ok":false,"error":"%s"}', "invalid json: " .. tostring(json_err))
         end
-        encoded_args = req_body
+        encoded_args = body
     end
 
-    http.log("Calling mission:" .. mission_api_handler .. ": " .. tostring(encoded_args))
     local result, err = http.call_mission(mission_api_handler, encoded_args)
     if (not result) then
         http.log("Mission call error:" ..  tostring(result) .. ": " .. tostring(err))
@@ -289,32 +321,37 @@ function http.injectApiIntoMission(file)
         return false
     end
 
-    -- The code to be executed in the 'mission' state. It calls a_do_file,
-    -- which in turn loads the script into the Mission Scripting Environment (MSE).
-    local code = "a_do_file([[" .. path .. "]])"
+    -- Read the file content to be injected.
+    local file, err = io.open(path, "r")
+    if not file then
+        http.log("Failed to open " .. path .. ": " .. tostring(err))
+        return false
+    end
+    local mission_code = file:read("*a")
+    file:close()
 
-    local ok, err = net.dostring_in("mission", code)
-    if (not ok) then
-        http.log("Error injecting script into mission: " .. tostring(err))
+    -- Execute the script content within the mission environment.
+    local result, success = net.dostring_in("mission", mission_code)
+    if (not success) then
+        http.log("Error injecting " .. path .. " script into mission: " .. tostring(result))
         return false
     end
 
+    http.log(path .. " script injection sucessfull")
     return true
 end
 
 http.callbacks.onSimulationStart = function()
     http.log("Simulation started")
 
+    if (not http.injectApiIntoMission('Scripts\\mist.lua')) then
+         http.log("mist.lua injection failed")
+         return
+    end
     if (not http.injectApiIntoMission('Scripts\\ATC_API.lua')) then
          http.log("ATC_API.lua injection failed")
          return
     end
-    http.log("ATC_API.lua injection sucessfull")
-    if (not http.injectApiIntoMission('Scripts\\mist.lua')) then
-         http.log("ATC_API.lua injection failed")
-         return
-    end
-    http.log("mist.lua injection sucessfull")
 
     local ok, err = http.init()
     if (not ok) then
