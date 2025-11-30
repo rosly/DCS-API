@@ -65,8 +65,8 @@ function ATC_API.json_decode(text)
     return nil, "json decoder unavailable"
 end
 
-function ATC_API.json_encode_error(function, message)
-    return string.format('{"ok":false,"function":"%s","error":"%s"}', function, tostring(message))
+function ATC_API.json_encode_error(func, message)
+    return string.format('{"ok":false,"function":"%s","error":"%s"}', func, tostring(message))
 end
 
 --- Dispatch an ATC API method call arriving from the HTTP server.
