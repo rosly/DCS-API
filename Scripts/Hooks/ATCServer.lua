@@ -4,13 +4,16 @@ http = {
     callbacks = {},
     config = {
         host = "127.0.0.1",
-        port = 5014,
+        port = 5017,
     },
     server = nil,
+-- Temp file used for a_do_script() return value passthrough
+    tmpfile = (require("lfs")).tempdir() .. "ATCServer.a_do_script.tmp",
 -- Route handlers keyed by method, then path
     http_mission_handlers = {
         GET = {
-            ["/atc/traffic"] = "listTraffic",
+            ["/atc/ping"] = "ping",
+            ["/atc/traffic"] = "listAirTraffic",
 --            ["/atc/airfields"] = "listAirfields",
 --            ["/atc/runway-state"] = "getRunwayState",
         },
@@ -96,12 +99,12 @@ function http.call_mission(method_name, args)
     local mission_code = string.format([==[
         return a_do_script([=[
             if (not ATC_API) or (not ATC_API.dispatch) then
-                return [[{"error":"ATC_API not loaded"}]]
+                return [['{"ok":false,"function":"a_do_script_wrapper","result":"ATC_API not loaded"}']]
             end
             local status, result = pcall(ATC_API.dispatch, %q, %q)
             if not status then
-                return string.format([[{"error":"%%s"}]], tostring(result))
-            end 
+                return [['{"ok":false,"function":"a_do_script_wrapper","result":"' .. tostring(result) .. '"}']]
+            end
             return result
         ]=])
     ]==], method_name, args)
@@ -111,7 +114,7 @@ function http.call_mission(method_name, args)
     if (not success) then
         err_str = string.format("mission dispatch failed for %s: %s, %s", method_name, tostring(result), tostring(success))
         http.log(err_str)
-        return err_str
+        return nil, err_str
     end
     http.log(string.format("mission dispatch success for %s: %s, %s", method_name, tostring(result), tostring(success)))
 

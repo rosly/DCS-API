@@ -38,7 +38,8 @@ ATC_API.coalitionSideToName = {
     [0] = "NEUTRAL",  -- coalition.side.NEUTRAL
 }
 
-ATC_API.mist = mist    
+ATC_API.mist = mist
+ATC_API.log = mist.Logger:new("ATC_API", 'info')
 
 function ATC_API.json_encode(tbl)
     if net and net.lua2json then
@@ -216,6 +217,7 @@ function ATC_API.assertRadarUnit(atcUnit)
 end
 
 function ATC_API.methods.ping(args)
+    ATC_API.log:info("ATC_API.methods.ping called")
     return '{"ok":true,"function":"ATC_API.methods.ping","result":"Hello world!"}'
 end
 
