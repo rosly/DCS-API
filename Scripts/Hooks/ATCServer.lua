@@ -134,7 +134,7 @@ function http.call_mission(method_name, args)
         http.log(err_str)
         return nil, err_str
     end
-    http.log(string.format("mission dispatch success for %s: %s, %s",method_name, tostring(exec_result), tostring(success)))
+    http.log(string.format("dostring_in() for %s: returned %s", method_name, tostring(exec_result)))
 
     -- workaround: read the result back from the temp file
     local file, err = io.open(http.tmpfile, "r")

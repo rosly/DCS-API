@@ -105,10 +105,11 @@ function ATC_API.dispatch(methodName, argsJson)
     end
 
     local encoded, encode_err = ATC_API.json_encode(result)
-    if encoded then
-        return encoded
+    if not encoded then
+        return ATC_API.json_encode_error("ATC_API.dispatch", "invalid json result encoding output: " .. tostring(encode_err))
     end
-    return ATC_API.json_encode_error("ATC_API.dispatch", "invalid json result encoding output: " .. tostring(encode_err))
+
+    return encoded
 end
 
 --- Compute the bearing in degrees between two 3D points.
@@ -218,24 +219,37 @@ end
 
 function ATC_API.methods.ping(args)
     ATC_API.log:info("ATC_API.methods.ping called")
-    return '{"ok":true,"function":"ATC_API.methods.ping","result":"Hello world!"}'
+    return { 
+        ok = true,
+        func = "ATC_API.methods.ping",
+        result = "Hello world!"
+    }
 end
 
 --- Enumerate airborne contacts detected by the ATC radar sensors.
 -- @param args.atcUnit Unit: Radar-capable unit. Range: must exist and have sensors.
 -- @return table: Array of contact tables for in-air aircraft/helicopters.
 function ATC_API.methods.listAirTraffic(args)
+
+    local function return_error(error_str)
+        return { 
+            ok = false,
+            func = "ATC_API.methods.listAirTraffic",
+            result = error_str
+        }
+    end
+
     if (not args.atcUnit) then
-        return ATC_API.json_encode_error("ATC_API.assertRadarUnit", "atcUnit is required")
+        return return_error("atcUnit is required")
     end
     local atcUnit = Unit.getByName(args.atcUnit)
     if (not atcUnit) then
-        return ATC_API.json_encode_error("ATC_API.assertRadarUnit", "ATC unit not found: " .. tostring(args.atcUnit))
+        return return_error("atcUnit not found: " .. args.atcUnit)
     end
 
     local status, result = ATC_API.assertRadarUnit(atcUnit)
     if (not status) then
-        return ATC_API.json_encode_error("ATC_API.assertRadarUnit", result)
+        return return_error("ATC_API.assertRadarUnit failed: " .. result)
     end
     local controller = result
     local contacts = {}
