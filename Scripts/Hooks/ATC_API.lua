@@ -38,14 +38,6 @@ ATC_API.coalitionSideToName = {
     [coalition.side.NEUTRAL] = "NEUTRAL",
 }
 
---ATC_API.mist_loaded, ATC_API.mist = pcall(function()
---    -- Assuming mist.lua is in the same directory as ATC_API.lua.
---    -- The path for dofile is relative to the Scripts/ folder in the .miz
---    dofile("./Scripts/mist.lua")
---    return mist
---end)
-
-ATC_API.mist_loaded = true
 ATC_API.mist = mist    
 
 function ATC_API.json_encode(tbl)
@@ -79,7 +71,7 @@ end
 -- @treturn string JSON encoded response body ready for HTTP consumption.
 function ATC_API.dispatch(methodName, argsJson)
 
-    if (not ATC_API.mist_loaded) then
+    if (not ATC_API.mist) then
         return ATC_API.encode_response(ATC_API.error_payload("mist.lua is missing or failed to load"))
     end
 
@@ -184,6 +176,8 @@ end
 function ATC_API.buildContact(atcUnit, controller, unit)
     local atcPosition = atcUnit:getPoint()
     local position = unit:getPoint()
+    local velocity = unit:getVelocity() or { x = 0, y = 0, z = 0 }
+    local horizontalSpeed = math.sqrt((velocity.x or 0) ^ 2 + (velocity.z or 0) ^ 2)
     local desc = unit:getDesc()
     return {
         trackId = unit:getID(),
@@ -194,11 +188,11 @@ function ATC_API.buildContact(atcUnit, controller, unit)
         unitCategory = ATC_API.unitCategoryName(desc.category) or "UNKNOWN",
         typeName = unit:getTypeName(),
         position = position,
-        velocity = unit:getVelocity(),
-        altitudeM = position.y,
-        headingDeg = ATC_API.mist.utils.toDegree(ATC_API.mist.getAttitude(unit).Heading),
-        rangeKm = ATC_API.mist.utils.get2DDist(atcPosition, position) / 1000,
-        bearingDeg = ATC_API.bearingDeg(atcPosition, position),
+        groundSpeedKmh = ATC_API.mist.utils.round(ATC_API.mist.utils.mpsToKmph(horizontalSpeed), 2),
+        altitudeM = ATC_API.mist.utils.round(position.y, 2),
+        headingDeg = ATC_API.mist.utils.round(ATC_API.mist.utils.toDegree(ATC_API.mist.getAttitude(unit).Heading), 2),
+        rangeKm = ATC_API.mist.utils.round(ATC_API.mist.utils.get2DDist(atcPosition, position) / 1000, 3),
+        bearingDeg = ATC_API.mist.utils.round(ATC_API.bearingDeg(atcPosition, position), 2),
         detection = ATC_API.detectionFlags(controller, unit),
         RCS = desc.RCS,
         lastSeenTimeSec = timer.getTime(),
@@ -215,7 +209,16 @@ function ATC_API.assertRadarUnit(atcUnit)
     assert(controller, "atcUnit is missing controller")
     if atcUnit.hasSensors then
         local hasRadar = atcUnit:hasSensors(Unit.SensorType.RADAR)
-        assert(hasRadar, "atcUnit must have radar sensors")
+        local radars = atcUnit:getSensors()[Unit.SensorType.RADAR]
+        local validRadar = false
+        if radars then
+            for _, radar in ipairs(radars) do
+                if (radar.type == 1) and radar.detectionDistanceAir and radar.detectionDistanceAir.upperHemisphere and radar.detectionDistanceAir.upperHemisphere.headOn then
+                    validRadar = true
+                end
+            end
+        end
+        assert(hasRadar and validRadar, "atcUnit must have radar sensors")
     end
     return atcUnit, controller
 end
@@ -233,17 +236,104 @@ function ATC_API.methods.listAirTraffic(args)
     end
 
     local _, controller = ATC_API.assertRadarUnit(atcUnit)
-    local detected = controller:getDetectedTargets(Controller.Detection.RADAR, Controller.Detection.VISUAL, Controller.Detection.OPTIC)
     local contacts = {}
-    for _, entry in pairs(detected) do
-        local target = entry.object
-        if target:inAir() then
-            local desc = target:getDesc()
-            if desc and (desc.category == Unit.Category.AIRPLANE or desc.category == Unit.Category.HELICOPTER) then
+    local addedIds = {}
+
+    -----------------------------------------------------------------------
+    -- 1) Primary pass: use AI-reported detected targets (usually hostiles).
+    -----------------------------------------------------------------------
+    local detected = controller:getDetectedTargets(
+        Controller.Detection.RADAR,
+        Controller.Detection.VISUAL,
+        Controller.Detection.OPTIC
+    )
+
+    if detected then
+        for _, entry in pairs(detected) do
+            local target = entry.object
+            if target and target.isExist and target:isExist() and target:inAir() then
+                local desc = target:getDesc()
+                if desc and (desc.category == Unit.Category.AIRPLANE or desc.category == Unit.Category.HELICOPTER) then
                     local contact = ATC_API.buildContact(atcUnit, controller, target)
                     table.insert(contacts, contact)
+                    addedIds[target:getID()] = true
+                end
             end
         end
     end
-    return { contacts, atcUnit:getSensors() }
+
+    -----------------------------------------------------------------------
+    -- 2) Secondary pass: sphere search based on radar detectionDistanceAir
+    --    and simple RCS-based range scaling, filtered by terrain LOS.
+    -----------------------------------------------------------------------
+    local radars = atcUnit:getSensors()[Unit.SensorType.RADAR]
+    local reference1m3RCSDetectionRange = 0
+    if radars then
+        for _, radar in ipairs(radars) do
+            if (radar.type == 1) and radar.detectionDistanceAir and radar.detectionDistanceAir.upperHemisphere and radar.detectionDistanceAir.upperHemisphere.headOn then
+                if radar.detectionDistanceAir.upperHemisphere.headOn > reference1m3RCSDetectionRange then
+                    reference1m3RCSDetectionRange = radar.detectionDistanceAir.upperHemisphere.headOn
+                end
+            end
+        end
+    end
+
+    local atcPos = atcUnit:getPoint()
+    -- below is actually buggy and will return objects based on box rather than sphere
+    -- https://forum.dcs.world/topic/324176-worldsearchobjects-appears-to-search-bounding-box-instead-of-specified-sphere-volume/
+    -- This does not makes much difference as we filter out objects based on range and RCS
+    -- But in order to get all airplanes radar can ddetect we need to take into acount that typical aircraft RCS is around 5.0m3
+    local volume = {
+        id = world.VolumeType.SPHERE,
+        params = {
+            point  = atcPos,
+            radius = reference1m3RCSDetectionRange * 5.0,
+        }
+    }
+
+    local function sphereHandler(unit)
+        if (not unit) or (not unit.isExist) or (not unit:isExist()) or (not unit:inAir()) then
+            return true
+        end
+
+        local uid = unit:getID()
+        if addedIds[uid] then
+            return true
+        end
+
+        local desc = unit:getDesc()
+        if not (desc and (desc.category == Unit.Category.AIRPLANE or desc.category == Unit.Category.HELICOPTER)) then
+            return true
+        end
+
+        -- RCS-based range scaling: R_eff = R_ref * RCS^(1/4)
+        local sigma = desc.RCS or 1.0
+        if sigma <= 0 then
+            sigma = 1.0
+        end
+        local unitPos = unit:getPoint()
+        local range = ATC_API.mist.utils.get3DDist(atcPos, unitPos)
+        if range > (reference1m3RCSDetectionRange * math.pow(sigma, 0.25)) then
+            return true
+        end
+
+        -- line-of-sight check between radar and target.
+        local radarLoS = { x = atcPos.x, y = atcPos.y + 5.0, z = atcPos.z }
+        local targetLoS = { x = unitPos.x, y = unitPos.y, z = unitPos.z }
+        if not land.isVisible(radarLoS, targetLoS) then
+            return true
+        end
+
+        local contact = ATC_API.buildContact(atcUnit, controller, unit)
+        table.insert(contacts, contact)
+        addedIds[uid] = true
+
+        return true
+    end
+
+    world.searchObjects(Object.Category.UNIT, volume, sphereHandler)
+
+    return contacts
 end
+
+return ATC_API

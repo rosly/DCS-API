@@ -122,12 +122,14 @@ function http.handle_http_request(method, url_path, headers, body)
     end
 
     if method == "GET" then
+        http.log(method .. " encoding query_params:" .. tostring(query_params))
         local encoded_args, json_err = http.json_encode(query_params)
         if (not encoded_args) then
             http.log("json_encode failed for " .. mission_api_handler .. ": " .. tostring(json_err))
             return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode arguments: %s"}', tostring(json_err))
         end
     else
+        http.log(method .. " encoding req_body:" .. tostring(req_body))
         local req_body = body or ""
         local body_tbl, json_err = http.json_decode(req_body)
         if (not body_tbl) then
@@ -136,17 +138,22 @@ function http.handle_http_request(method, url_path, headers, body)
         encoded_args = req_body
     end
 
+    http.log("Calling mission:" .. mission_api_handler .. ": " .. tostring(encoded_args))
     local result, err = http.call_mission(mission_api_handler, encoded_args)
     if (not result) then
+        http.log("Mission call error:" ..  tostring(result) .. ": " .. tostring(err))
         return "499 Internal Server Error", string.format('{"ok":false,"error":"%s"}', tostring(err))
     end
+    http.log("Mission call result:" .. tostring(result))
     -- result should be JSON string, if it is not try use fallback
     if type(result) ~= "string" then
         local encoded_result, json_err = http.json_encode(result)
         if (not encoded_result) then
+            http.log("Mission result JSON transcoding error: " .. tostring(json_err))
             return "500 Internal Server Error", string.format('{"ok":false,"error":"failed to encode result: %s"}', tostring(json_err))
         end
         result = encoded_result
+        http.log("Mission result JSON transcoding result: " .. tostring(result))
     end
 
     return "200 OK", result
@@ -254,6 +261,14 @@ function http.init()
 end
 
 function http.stop()
+    for i = #http.clients, 1, -1 do
+        local client = http.clients[i]
+        table.remove(http.clients, i)
+        if client.socket then
+            client.socket:close()
+        end
+    end
+
     if http.server then
         http.server:close()
         http.server = nil
@@ -263,14 +278,14 @@ end
 --- Injects the ATC_API.lua script into the mission scripting environment.
 -- This is called from the onSimulationStart hook to make the API available
 -- to the mission without requiring manual setup by the mission author.
-function http.injectApiIntoMission()
+function http.injectApiIntoMission(file)
     -- lfs is available in the server hook environment
     local lfs = require("lfs")
-    local path = lfs.writedir() .. 'Scripts\\ATC_API.lua'
+    local path = lfs.writedir() .. file
 
     -- Check if the file exists before trying to inject it.
     if not (lfs.attributes(path, "mode") == "file") then
-        http.log("ATC_API.lua script not found at path: " .. path)
+        http.log(path .. " script not found")
         return false
     end
 
@@ -280,7 +295,7 @@ function http.injectApiIntoMission()
 
     local ok, err = net.dostring_in("mission", code)
     if (not ok) then
-        http.log("Error injecting ATC_API into mission: " .. tostring(err))
+        http.log("Error injecting script into mission: " .. tostring(err))
         return false
     end
 
@@ -289,14 +304,24 @@ end
 
 http.callbacks.onSimulationStart = function()
     http.log("Simulation started")
-    if (not http.injectApiIntoMission()) then
+
+    if (not http.injectApiIntoMission('Scripts\\ATC_API.lua')) then
          http.log("ATC_API.lua injection failed")
          return
     end
+    http.log("ATC_API.lua injection sucessfull")
+    if (not http.injectApiIntoMission('Scripts\\mist.lua')) then
+         http.log("ATC_API.lua injection failed")
+         return
+    end
+    http.log("mist.lua injection sucessfull")
+
     local ok, err = http.init()
     if (not ok) then
         http.log("HTTP server failed to start: " .. tostring(err))
     end
+
+    http.log("HTTP Server initialized sucessfully")
 end
 
 http.callbacks.onSimulationStop = function()
