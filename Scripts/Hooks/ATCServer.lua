@@ -96,28 +96,86 @@ function http.call_mission(method_name, args)
         http.log("Error: args to call_mission must be a string, got " .. type(args))
         return nil, "Internal error: arguments must be a JSON string."
     end
+
+    -- Build mission-side chunk.
+    -- a_do_script() will execute this in the mission scripting environment.
+    -- http_wrapper.a_do_scriturn() (defined in MissionScripting.lua) writes the
+    -- return value of _func() into SmartATC.a_do_script.tmp.
     local mission_code = string.format([==[
-        return a_do_script([=[
-            if (not ATC_API) or (not ATC_API.dispatch) then
-                return [['{"ok":false,"function":"a_do_script_wrapper","result":"ATC_API not loaded"}']]
+        a_do_script([=[
+            local _func = function ()
+                if (not ATC_API) or (not ATC_API.dispatch) then
+                    return '{"ok":false,"function":"http.call_mission.mission_code","result":"ATC_API not loaded"}'
+                end
+
+                local status, result = pcall(ATC_API.dispatch, %q, %q)
+                if not status then
+                    return '{"ok":false,"function":"http.call_mission.mission_code","result":"' .. tostring(result) .. '"}'
+                end
+                return result
             end
-            local status, result = pcall(ATC_API.dispatch, %q, %q)
-            if not status then
-                return [['{"ok":false,"function":"a_do_script_wrapper","result":"' .. tostring(result) .. '"}']]
+
+            if http_wrapper and http_wrapper.a_do_scriturn then
+                http_wrapper.a_do_scriturn(_func)
+            else
+                -- fallback: execute directly, but return value will be lost due to
+                -- a_do_script() bug; at least side effects still happen.
+                _func()
             end
-            return result
         ]=])
     ]==], method_name, args)
 
     http.log("Calling mission:" .. method_name .. ": " .. args)
-    local result, success = net.dostring_in("mission", mission_code)
-    if (not success) then
-        err_str = string.format("mission dispatch failed for %s: %s, %s", method_name, tostring(result), tostring(success))
+    -- Execute the wrapper in mission env; its return is ignored because
+    -- a_do_script() no longer passes return values correctly.
+    local exec_result, success = net.dostring_in("mission", mission_code)
+    if not success then
+        local err_str = string.format("mission dispatch failed for %s: %s, %s", method_name, tostring(exec_result), tostring(success))
         http.log(err_str)
         return nil, err_str
     end
-    http.log(string.format("mission dispatch success for %s: %s, %s", method_name, tostring(result), tostring(success)))
+    http.log(string.format("mission dispatch success for %s: %s, %s",method_name, tostring(exec_result), tostring(success)))
 
+    -- workaround: read the result back from the temp file
+    local file, err = io.open(http.tmpfile, "r")
+    if file == nil then
+        local err_str = string.format("mission dispatch tempfile open failed for %s (%s): %s", method_name, http.tmpfile, tostring(err))
+        http.log(err_str)
+        return nil, err_str
+    end
+    local result = file:read("*a")
+    if not result then
+        local err_str = string.format("mission dispatch tempfile read failed for %s (%s): %s", method_name, http.tmpfile, tostring(err))
+        http.log(err_str)
+        file:close()
+        return nil, err_str
+    end
+    file:close()
+
+    -- truncate (open for overwrite) temporary file to avoid stale data on next request
+    file, err = io.open(http.tmpfile, "w")
+    if file == nil then
+        http.log(string.format("warning: could not truncate temp file %s: %s", http.tmpfile, tostring(err)))
+    else
+        file:close()
+    end
+
+    -- check the tmpfile content
+    if (result == "") then
+        local err_str = string.format("mission dispatch for %s wrote empty temp file", method_name)
+        http.log(err_str)
+        return nil, err_str
+    end
+
+    if result:match("^ERROR:") then
+        local err_str = string.format("mission dispatch for %s returned error: %s", method_name, result)
+        http.log(err_str)
+        return nil, err_str
+    end
+
+    http.log(string.format("mission dispatch success for %s, result from temp file: %s", method_name, result))
+
+    -- in case of success first return argument is not nil
     return result
 end
 
