@@ -65,49 +65,49 @@ function ATC_API.json_decode(text)
     return nil, "json decoder unavailable"
 end
 
+function ATC_API.json_encode_error(function, message)
+    return string.format('{"ok":false,"function":"%s","error":"%s"}', function, tostring(message))
+end
+
 --- Dispatch an ATC API method call arriving from the HTTP server.
 -- @tparam string methodName Name of the ATC_API method to execute.
 -- @tparam string argsJson JSON encoded string of parameters (GET/PUT bodies).
 -- @treturn string JSON encoded response body ready for HTTP consumption.
 function ATC_API.dispatch(methodName, argsJson)
 
-    local function json_encode_error(message)
-        return '{"ok":false,"error":"ATC_API.dispatch error: ' .. tostring(message) .. '"}'
-    end
-
     if (not ATC_API.mist) then
-        return json_encode_error("mist.lua is missing or failed to load")
+        return ATC_API.json_encode_error("ATC_API.dispatch", "mist.lua is missing or failed to load")
     end
 
     local args, decode_err = ATC_API.json_decode(argsJson)
     if not args then
-        return json_encode_error("invalid json input: " .. tostring(decode_err))
+        return ATC_API.json_encode_error("ATC_API.dispatch", "invalid json input: " .. tostring(decode_err))
     end
     if args == nil or type(args) ~= "table" then
-        return json_encode_error("invalid input: ATC_API arguments must decode to a table")
+        return ATC_API.json_encode_error("ATC_API.dispatch", "invalid input: ATC_API arguments must decode to a table")
     end
 
     if (type(methodName) ~= "string") or (methodName == "") then
-        return json_encode_error("method name required")
+        return ATC_API.json_encode_error("ATC_API.dispatch", "method name required")
     end
     local handler = ATC_API.methods[methodName]
     if (handler == nil) or (type(handler) ~= "function") then
-        return json_encode_error("unknown method handler: " .. methodName)
+        return ATC_API.json_encode_error("ATC_API.dispatch", "unknown method handler: " .. methodName)
     end
 
     local ok, result = pcall(handler, args)
     if not ok then
-        return json_encode_error("pcall failed: " .. tostring(result))
+        return ATC_API.json_encode_error("ATC_API.dispatch", "pcall failed: " .. tostring(result))
     end
     if (result == nil) or (type(result) ~= "table") then
-        return json_encode_error("ATC_API methods must return a table")
+        return ATC_API.json_encode_error("ATC_API.dispatch", "ATC_API methods must return a table")
     end
 
     local encoded, encode_err = ATC_API.json_encode(result)
     if encoded then
         return encoded
     end
-    return json_encode_error("invalid json result encoding output: " .. tostring(encode_err))
+    return ATC_API.json_encode_error("ATC_API.dispatch", "invalid json result encoding output: " .. tostring(encode_err))
 end
 
 --- Compute the bearing in degrees between two 3D points.
@@ -187,10 +187,16 @@ end
 -- @param atcUnit Unit: Radar unit driving the ATC API. Range: existing `Unit` instance.
 -- @return Unit, Controller: The validated unit and its controller.
 function ATC_API.assertRadarUnit(atcUnit)
-    assert(atcUnit, "atcUnit is required")
-    assert(atcUnit.isExist and atcUnit:isExist(), "atcUnit does not exist")
+    if not atcUnit then
+        return false, "atcUnit is required"
+    end
+    if not (atcUnit.isExist and atcUnit:isExist()) then
+        return false, "atcUnit does not exist"
+    end
     local controller = atcUnit:getController()
-    assert(controller, "atcUnit is missing controller")
+    if not controller then
+        return false, "atcUnit is missing controller"
+    end
     if atcUnit.hasSensors then
         local hasRadar = atcUnit:hasSensors(Unit.SensorType.RADAR)
         local radars = atcUnit:getSensors()[Unit.SensorType.RADAR]
@@ -202,9 +208,15 @@ function ATC_API.assertRadarUnit(atcUnit)
                 end
             end
         end
-        assert(hasRadar and validRadar, "atcUnit must have radar sensors")
+        if not (hasRadar and validRadar) then
+            return false, "atcUnit must have search radar sensor"
+        end
     end
-    return atcUnit, controller
+    return true, controller
+end
+
+function ATC_API.methods.ping(args)
+    return '{"ok":true,"function":"ATC_API.methods.ping","result":"Hello world!"}'
 end
 
 --- Enumerate airborne contacts detected by the ATC radar sensors.
@@ -212,14 +224,18 @@ end
 -- @return table: Array of contact tables for in-air aircraft/helicopters.
 function ATC_API.methods.listAirTraffic(args)
     if (not args.atcUnit) then
-        return { ok = false, error = "atcUnit is required" } 
+        return ATC_API.json_encode_error("ATC_API.assertRadarUnit", "atcUnit is required")
     end
     local atcUnit = Unit.getByName(args.atcUnit)
     if (not atcUnit) then
-        return { ok = false, error = "ATC unit not found: " .. tostring(args.atcUnit) }
+        return ATC_API.json_encode_error("ATC_API.assertRadarUnit", "ATC unit not found: " .. tostring(args.atcUnit))
     end
 
-    local _, controller = ATC_API.assertRadarUnit(atcUnit)
+    local status, result = ATC_API.assertRadarUnit(atcUnit)
+    if (not status) then
+        return ATC_API.json_encode_error("ATC_API.assertRadarUnit", result)
+    end
+    local controller = result
     local contacts = {}
     local addedIds = {}
 

@@ -310,45 +310,58 @@ end
 --- Injects the ATC_API.lua script into the mission scripting environment.
 -- This is called from the onSimulationStart hook to make the API available
 -- to the mission without requiring manual setup by the mission author.
-function http.injectApiIntoMission(file)
+function http.injectApiIntoMission(file, method)
+    method = method or "dostring" -- Default to direct content injection
+
     -- lfs is available in the server hook environment
     local lfs = require("lfs")
     local path = lfs.writedir() .. file
 
     -- Check if the file exists before trying to inject it.
     if not (lfs.attributes(path, "mode") == "file") then
-        http.log(path .. " script not found")
+        http.log("injection failed: " .. path .. " script not found")
         return false
     end
 
-    -- Read the file content to be injected.
-    local file, err = io.open(path, "r")
-    if not file then
-        http.log("Failed to open " .. path .. ": " .. tostring(err))
+    local result, success
+    if method == "dofile" then
+        http.log("Injecting " .. path .. " using a_do_file...")
+        local mission_code = "a_do_file([[" .. path .. "]])"
+        result, success = net.dostring_in("mission", mission_code)
+    else -- Default to "dostring"
+        http.log("Injecting " .. path .. " using a_do_string...")
+        -- Read the file content to be injected.
+        local f, err = io.open(path, "r")
+        if not f then
+            http.log("Failed to open " .. path .. ": " .. tostring(err))
+            return false
+        end
+        local mission_code = f:read("*a")
+        f:close()
+
+        -- Execute the script content within the mission environment.
+        result, success = net.dostring_in("mission", string.format([==[
+            return a_do_script([=[%s]=])
+        ]==], mission_code))
+    end
+
+    if not success then
+        http.log(string.format("Error injecting %s script into mission (method: %s): %s", path, method, tostring(result)))
         return false
     end
-    local mission_code = file:read("*a")
-    file:close()
 
-    -- Execute the script content within the mission environment.
-    local result, success = net.dostring_in("mission", mission_code)
-    if (not success) then
-        http.log("Error injecting " .. path .. " script into mission: " .. tostring(result))
-        return false
-    end
-
-    http.log(path .. " script injection sucessfull")
+    http.log(path .. " script injection successful (method: " .. method .. ")")
     return true
 end
 
 http.callbacks.onSimulationStart = function()
     http.log("Simulation started")
 
-    if (not http.injectApiIntoMission('Scripts\\mist.lua')) then
+    if (not http.injectApiIntoMission('Scripts\\mist.lua', "dostring")) then
          http.log("mist.lua injection failed")
          return
     end
-    if (not http.injectApiIntoMission('Scripts\\ATC_API.lua')) then
+    if (not http.injectApiIntoMission('Scripts\\ATC_API.lua', "dostring")) then
          http.log("ATC_API.lua injection failed")
          return
     end
